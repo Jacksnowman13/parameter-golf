@@ -818,6 +818,11 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        recurrent_enabled: bool = False,
+        recurrent_shared_layers: int = 6,
+        recurrent_loops: int = 2,
+        recurrent_loop_norm: bool = True,
+        recurrent_gated_residual: bool = True,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
