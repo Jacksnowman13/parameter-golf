@@ -585,7 +585,7 @@ class MLP(nn.Module):
         self.proj = CastedLinear(hidden, dim, bias=False)
         self.proj._zero_init = True
     def forward(self, x: Tensor) -> Tensor:
-        x = torch.relu(self.fc(x), negative_slope=0.5)
+        x = F.leaky_relu(self.fc(x), negative_slope=0.5)
         return self.proj(x.square())
 class Block(nn.Module):
     def __init__(
@@ -1447,16 +1447,18 @@ def main() -> None:
         map_location="cpu",
     )
     deq_state = dequantize_mixed_int6(quant_state["w"], quant_state["m"], sd_cpu)
-    eval_model = GPT(
+    eval_model = GPT(   
         vocab_size=args.vocab_size, num_layers=args.num_layers, model_dim=args.model_dim,
         num_heads=args.num_heads, num_kv_heads=args.num_kv_heads, mlp_mult=args.mlp_mult,
         tie_embeddings=args.tie_embeddings, tied_embed_init_std=args.tied_embed_init_std,
         logit_softcap=args.logit_softcap, rope_base=args.rope_base, qk_gain_init=args.qk_gain_init,
         mtp_num_heads=0, mtp_loss_weight=0.0,
         bigram_vocab_size=args.bigram_vocab_size, bigram_dim=args.bigram_dim,
-        xsa_last_n=args.xsa_last_n,  # must match training model
+        xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
+        num_unique_layers=args.num_unique_layers if args.num_unique_layers > 0 else 0,
+        num_loops=args.num_loops,
     ).to(device).bfloat16()
     for m in eval_model.modules():
         if isinstance(m, CastedLinear):
