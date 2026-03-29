@@ -88,11 +88,13 @@ class Hyperparameters:
     ve_enabled = bool(int(os.environ.get("VE_ENABLED", "1")))
     ve_dim = int(os.environ.get("VE_DIM", 128))
     ve_layers = os.environ.get("VE_LAYERS", "9,10")
-    gated_attention = bool(int(os.environ.get("GATED_ATTENTION", "0")))
-    value_residual = bool(int(os.environ.get("VALUE_RESIDUAL", "0")))
+    num_unique_layers = int(os.environ.get("NUM_UNIQUE_LAYERS", 0))
+    num_loops = int(os.environ.get("NUM_LOOPS", 1))
     adapter_rank = int(os.environ.get("ADAPTER_RANK", 0))
     adapter_last_n = int(os.environ.get("ADAPTER_LAST_N", 4))
     adapter_scale = float(os.environ.get("ADAPTER_SCALE", 1.0))
+    gated_attention = bool(int(os.environ.get("GATED_ATTENTION", "0")))
+    value_residual = bool(int(os.environ.get("VALUE_RESIDUAL", "0")))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "0")))
     ttt_lr = float(os.environ.get("TTT_LR", 0.002))
     ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
@@ -612,9 +614,6 @@ class CausalSelfAttention(nn.Module):
         qk_gain_init: float,
         gated_attention: bool = False,
         value_residual: bool = False,
-        adapter_rank: int = 0,
-        adapter_last_n: int = 4,
-        adapter_scale: float = 1.0,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -815,6 +814,11 @@ class GPT(nn.Module):
         ve_enabled: bool = False,
         ve_dim: int = 128,
         ve_layers: str = "9,10",
+        num_unique_layers: int = 0,
+        num_loops: int = 1,
+        adapter_rank: int = 0,
+        adapter_last_n: int = 4,
+        adapter_scale: float = 1.0,
         gated_attention: bool = False,
         value_residual: bool = False,
     ):
@@ -840,6 +844,16 @@ class GPT(nn.Module):
         kv_dim = num_kv_heads * head_dim
         mlp_dim = int(mlp_mult * model_dim)
         self.num_layers = num_layers
+        self.adapter_rank = adapter_rank
+        self.adapter_last_n = adapter_last_n
+        self.adapter_scale = adapter_scale
+        self.total_effective_layers = num_layers
+        if adapter_rank > 0 and adapter_last_n > 0:
+            self.adapters = nn.ModuleList(
+                [LearnedResidualAdapter(model_dim, adapter_rank, adapter_scale) for _ in range(adapter_last_n)]
+            )
+        else:
+            self.adapters = nn.ModuleList()
         self.qo_bank = nn.Parameter(torch.empty(2 * num_layers, model_dim, model_dim))
         self.kv_bank = nn.Parameter(torch.empty(2 * num_layers, kv_dim, model_dim))
         self.mlp_up_bank = nn.Parameter(torch.empty(num_layers, mlp_dim, model_dim))
@@ -927,14 +941,13 @@ class GPT(nn.Module):
     def _adapter_for_layer(self, effective_layer: int):
         if len(self.adapters) == 0:
             return None
-        start = max(0, self.total_effective_layers - len(self.adapters))
+        start = max(0, self.total_effective_layers - self.adapter_last_n)
         if effective_layer < start:
             return None
         idx = effective_layer - start
         if idx < 0 or idx >= len(self.adapters):
             return None
         return self.adapters[idx]
-
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         n = self.num_layers
         x = self.tok_emb(input_ids)
@@ -1517,11 +1530,13 @@ def main() -> None:
         ve_enabled=args.ve_enabled,
         ve_dim=args.ve_dim,
         ve_layers=args.ve_layers,
-        gated_attention=args.gated_attention,
-        value_residual=args.value_residual,
+        num_unique_layers=args.num_unique_layers,
+        num_loops=args.num_loops,
         adapter_rank=args.adapter_rank,
         adapter_last_n=args.adapter_last_n,
         adapter_scale=args.adapter_scale,
+        gated_attention=args.gated_attention,
+        value_residual=args.value_residual,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1554,12 +1569,12 @@ def main() -> None:
     ]
     if base_model.skip_weights.numel() > 0:
         scalar_params.append(base_model.skip_weights)
-    scalar_params.append(base_model.smear.gate)
-    if hasattr(base_model, "adapters") and len(base_model.adapters) > 0:
+    if hasattr(base_model, 'adapters') and len(base_model.adapters) > 0:
         for adapter in base_model.adapters:
             matrix_params.append(adapter.down.weight)
             matrix_params.append(adapter.up.weight)
             scalar_params.append(adapter.scale)
+    scalar_params.append(base_model.smear.gate)
     if base_model.bigram is not None:
         scalar_params.append(base_model.bigram.scale)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
@@ -1869,8 +1884,12 @@ def main() -> None:
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
+        num_unique_layers=args.num_unique_layers,
+        num_loops=args.num_loops,
+        adapter_rank=args.adapter_rank,
+        adapter_last_n=args.adapter_last_n,
+        adapter_scale=args.adapter_scale,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
-        adapter_rank=args.adapter_rank, adapter_last_n=args.adapter_last_n, adapter_scale=args.adapter_scale,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
